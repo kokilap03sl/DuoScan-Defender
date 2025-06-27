@@ -1,4 +1,5 @@
-DuoScan Defender- An Advanced Mobile QR and Barcode Scanner for Ultimate Protection
+# DuoScan Defender
+An Advanced Mobile QR and Barcode Scanner for Ultimate Protection
 
 DuoScan Defender is a secure, cross- platform mobile app designed to scan QR codes and barcodes while performing real- time threat detection using the VirusTotal API. Built using Flutter for the frontend and Node.js with MongoDB for the backend, the app offers a smooth, ad- free user experience on both Android and iOS.
 
