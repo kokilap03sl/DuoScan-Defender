@@ -1,0 +1,404 @@
+import 'package:flutter/material.dart';
+import 'navbar.dart';
+import 'home_page_1.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'history_log.dart';
+import 'package:provider/provider.dart';
+import 'app_state.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
+import 'services/api_service.dart';
+
+class HomePage2 extends StatefulWidget {
+  final String url;
+
+  const HomePage2({super.key, required this.url});
+
+  @override
+  State<HomePage2> createState() => _HomePage2State();
+}
+
+class _HomePage2State extends State<HomePage2> {
+  late String deviceId;
+  late String urlId;
+  bool hasCheckedSecurity = false;
+  String? _selectedSearchEngine;
+  List<String> _installedSearchEngines = [];
+
+  static const browserPackages = {
+    'Chrome': 'com.android.chrome',
+    'Firefox': 'org.mozilla.firefox',
+    'Edge': 'com.microsoft.emmx',
+    'Opera': 'com.opera.browser',
+    'Brave': 'com.brave.browser',
+    'Samsung Internet': 'com.sec.android.app.sbrowser',
+  };
+
+  static const platform = MethodChannel('com.yourapp/browser_launcher');
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeAndStoreUrl();
+    _loadPreferredSearchEngine();
+    _fetchInstalledSearchEngines();
+    _autoCopyResultToClipboard();
+  }
+
+  Future<void> _autoCopyResultToClipboard() async {
+    final prefs = await SharedPreferences.getInstance();
+    final autoCopy = prefs.getBool('auto_copy_to_clipboard') ?? false;
+    if (autoCopy && widget.url.isNotEmpty) {
+      await Clipboard.setData(ClipboardData(text: widget.url));
+    }
+  }
+
+  Future<String> _getDeviceId() async {
+    final deviceInfo = DeviceInfoPlugin();
+    final androidInfo = await deviceInfo.androidInfo;
+    return androidInfo.id ?? 'unknown_device';
+  }
+
+  Future<void> _initializeAndStoreUrl() async {
+    deviceId = await _getDeviceId();
+    try {
+      final response = await ApiService.post(
+        'add-url',
+        {
+          'device_id': deviceId,
+          'url': widget.url,
+          'scan_status': 'Not Checked',
+        },
+      );
+      urlId = response['url_id'].toString();
+    } catch (e) {
+      _showErrorDialog(context, 'Failed to store URL.');
+    }
+  }
+
+  Future<void> _markUrlVisited() async {
+    try {
+      await ApiService.post(
+        'mark-url-visited',
+        {'url_id': urlId},
+      );
+    } catch (e) {}
+  }
+
+  Future<void> _checkURLSecurity(BuildContext context, String url) async {
+    final resultType = _identifyResultType(url);
+    final isLink = (resultType == 'url' || resultType == 'email' || resultType == 'wifi');
+
+    if (!isLink) {
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('No actionable link found'),
+          content: const Text('The scanned result is not a link.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text(
+          'Verifying security status — this may take a moment',
+          style: TextStyle(fontSize: 14),
+        ),
+        content: SizedBox(
+          height: 50,
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: CircularProgressIndicator(),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final status = await ApiService.checkUrlSafety(
+        urlId: urlId,
+        url: url,
+      );
+
+      Navigator.of(context).pop();
+
+      setState(() {
+        hasCheckedSecurity = true;
+      });
+
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(status == 'Secure' ? 'Secure URL' : 'Insecure URL'),
+          content: Text(status == 'Secure'
+              ? 'The URL is safe to visit.'
+              : 'Warning! This URL may not be secure.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      Navigator.of(context).pop();
+      _showErrorDialog(context, error.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  void _showErrorDialog(BuildContext context, String message) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Error'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _loadPreferredSearchEngine() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedEngine = prefs.getString('preferred_search_engine');
+    setState(() {
+      _selectedSearchEngine = savedEngine;
+    });
+  }
+
+  Future<void> _fetchInstalledSearchEngines() async {
+    try {
+      const platform = MethodChannel('com.yourapp/search_engine_detection');
+      final List<dynamic> searchEngines =
+          await platform.invokeMethod('getInstalledSearchEngines');
+      List<String> engines = searchEngines
+          .where((s) => s != null && s.toString().trim().isNotEmpty)
+          .map((s) => s.toString())
+          .toSet()
+          .toList();
+
+      if (Theme.of(context).platform == TargetPlatform.android) {
+        if (!engines.contains('Samsung Internet')) {
+          engines.add('Samsung Internet');
+        }
+      } else if (Theme.of(context).platform == TargetPlatform.iOS) {
+        if (!engines.contains('Safari')) {
+          engines.add('Safari');
+        }
+      }
+
+      engines.remove('Search Engines');
+      engines.insert(0, 'Search Engines');
+
+      setState(() {
+        _installedSearchEngines = engines;
+      });
+    } on PlatformException catch (e) {
+      debugPrint('Error fetching search engines: $e');
+      setState(() {
+        _installedSearchEngines = ['Search Engines'];
+      });
+    }
+  }
+
+  Future<void> _launchUrlWithSearchEngine(String url) async {
+    String? engine = _selectedSearchEngine;
+    if (engine == null || engine == 'Search Engines') {
+      await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+      await _markUrlVisited();
+      return;
+    }
+
+    String? package = browserPackages[engine];
+    try {
+      await platform.invokeMethod('launchBrowser', {
+        'url': url,
+        'package': package,
+      });
+      await _markUrlVisited();
+    } catch (e) {
+      await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+      await _markUrlVisited();
+    }
+  }
+
+  String _identifyResultType(String text) {
+    final urlPattern = RegExp(
+        r'^(https?:\/\/)?'
+        r'([a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}'
+        r'(:\d+)?(\/\S*)?$');
+
+    final emailPattern = RegExp(
+        r'^[\w\.\-]+@([\w\-]+\.)+[a-zA-Z]{2,}$');
+
+    final wifiPattern = RegExp(
+        r'^WIFI:S:[^;]+;T:(WEP|WPA|nopass);P:[^;]*;;$',
+        caseSensitive: false);
+
+    final productPattern = RegExp(r'^\d{12,13}$');
+
+    if (urlPattern.hasMatch(text)) {
+      return 'url';
+    } else if (emailPattern.hasMatch(text)) {
+      return 'email';
+    } else if (wifiPattern.hasMatch(text)) {
+      return 'wifi';
+    } else if (productPattern.hasMatch(text)) {
+      return 'product';
+    } else {
+      return 'text';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final resultType = _identifyResultType(widget.url);
+    final isLink = (resultType == 'url' || resultType == 'email' || resultType == 'wifi');
+
+    return Scaffold(
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      body: Column(
+        children: [
+          Stack(
+            children: [
+              ClipPath(
+                clipper: WaveClipper(),
+                child: Container(
+                  height: 160,
+                  width: double.infinity,
+                  color: Theme.of(context).primaryColor,
+                ),
+              ),
+              Positioned(
+                top: 60,
+                left: 10,
+                child: IconButton(
+                  icon: const Icon(Icons.arrow_back, color: Colors.white),
+                  onPressed: () {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const HomePage1(),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 60),
+          Expanded(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 80),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    if (isLink)
+                      GestureDetector(
+                        onTap: () async {
+                          await _launchUrlWithSearchEngine(widget.url);
+                        },
+                        child: Center(
+                          child: Text(
+                            widget.url,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 18,
+                              color: Colors.white,
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
+                        ),
+                      )
+                    else
+                      Center(
+                        child: Text(
+                          widget.url,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            color: Colors.white,
+                            decoration: TextDecoration.none,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 20),
+                    ElevatedButton(
+                      onPressed: () => _checkURLSecurity(context, widget.url),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Theme.of(context).primaryColor,
+                        foregroundColor: Colors.white,
+                      ),
+                      child: const Text(
+                        'Ensure Security',
+                        style: TextStyle(fontSize: 16),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: const CustomNavBar(currentIndex: 0),
+    );
+  }
+}
+
+class WaveClipper extends CustomClipper<Path> {
+  @override
+  Path getClip(Size size) {
+    Path path = Path();
+    path.lineTo(0, size.height - 40);
+    var firstControlPoint = Offset(size.width / 4, size.height);
+    var firstEndPoint = Offset(size.width / 2, size.height - 40);
+    var secondControlPoint = Offset(size.width * 3 / 4, size.height - 80);
+    var secondEndPoint = Offset(size.width, size.height - 40);
+
+    path.quadraticBezierTo(
+      firstControlPoint.dx,
+      firstControlPoint.dy,
+      firstEndPoint.dx,
+      firstEndPoint.dy,
+    );
+    path.quadraticBezierTo(
+      secondControlPoint.dx,
+      secondControlPoint.dy,
+      secondEndPoint.dx,
+      secondEndPoint.dy,
+    );
+
+    path.lineTo(size.width, 0);
+    path.close();
+    return path;
+  }
+
+  @override
+  bool shouldReclip(CustomClipper<Path> oldClipper) => false;
+}
